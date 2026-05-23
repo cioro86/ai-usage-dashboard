@@ -6,6 +6,28 @@ Local dashboard for monitoring AI coding usage across:
 - Codex / OpenAI
 - other supported `ccusage` providers
 
+## Local usage
+
+Run the JSON refresh loop in terminal 1:
+
+```bash
+./scripts/refresh.sh
+```
+
+Run the local web server in terminal 2:
+
+```bash
+./scripts/start.sh
+```
+
+Open the dashboard locally:
+
+```text
+http://localhost:8080
+```
+
+The dashboard auto-refreshes every 5 minutes and tracks AI usage globally across Cursor, Claude Code, Codex/OpenAI and other supported `ccusage` providers.
+
 ## Requirements
 
 - Node.js

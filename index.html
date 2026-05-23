@@ -9,18 +9,88 @@
     body { font-family: system-ui, sans-serif; margin: 32px; background: #f7f7f8; color: #111; }
     h1 { margin-bottom: 8px; }
     h2 { margin-top: 32px; }
+    .controls {
+      display: flex;
+      gap: 12px;
+      align-items: end;
+      flex-wrap: wrap;
+      background: white;
+      padding: 16px;
+      border-radius: 14px;
+      box-shadow: 0 2px 12px #0001;
+      margin: 20px 0 24px;
+    }
+    .control {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .control label {
+      font-size: 12px;
+      font-weight: 700;
+      color: #444;
+    }
+    .control input {
+      padding: 10px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      font: inherit;
+      background: #fff;
+    }
+    .controls button {
+      padding: 10px 14px;
+      border: 0;
+      border-radius: 10px;
+      background: #111827;
+      color: white;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .controls button.secondary {
+      background: #e5e7eb;
+      color: #111827;
+    }
+    .summary {
+      margin-left: auto;
+      color: #555;
+      font-size: 14px;
+    }
     .cards { display: flex; gap: 16px; margin: 24px 0; flex-wrap: wrap; }
     .card { background: white; padding: 18px; border-radius: 14px; box-shadow: 0 2px 12px #0001; min-width: 180px; }
     .value { font-size: 28px; font-weight: 700; }
     .chart-box { background: white; border-radius: 14px; padding: 16px; box-shadow: 0 2px 12px #0001; }
     table { width: 100%; border-collapse: collapse; margin-top: 24px; background: white; border-radius: 14px; overflow: hidden; }
-    th, td { padding: 12px; border-bottom: 1px solid #eee; text-align: left; }
+    th, td { padding: 12px; border-bottom: 1px solid #eee; text-align: left; vertical-align: middle; }
     th { background: #fafafa; }
+    .badge {
+      color: white;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-weight: 700;
+      display: inline-block;
+      min-width: 72px;
+      text-align: center;
+    }
+    small { color: #555; }
   </style>
 </head>
 <body>
   <h1>AI Usage Dashboard</h1>
   <p>Generated from ccusage daily JSON export. Auto-refresh every 5 minutes.</p>
+
+  <div class="controls">
+    <div class="control">
+      <label for="startDate">From</label>
+      <input type="date" id="startDate" />
+    </div>
+    <div class="control">
+      <label for="endDate">To</label>
+      <input type="date" id="endDate" />
+    </div>
+    <button id="resetFilter" class="secondary">Show all</button>
+    <div id="rangeSummary" class="summary"></div>
+  </div>
 
   <div class="cards">
     <div class="card"><div>Total Cost</div><div class="value" id="totalCost">$0</div></div>
@@ -43,6 +113,7 @@
         <th>Cache Tokens</th>
         <th>Total Tokens</th>
         <th>Cost</th>
+        <th>Efficiency</th>
       </tr>
     </thead>
     <tbody id="providerRows"></tbody>
@@ -71,15 +142,14 @@ fetch('./ai-usage.json')
     const rows = data.daily || data;
     const items = Array.isArray(rows) ? rows : Object.values(rows);
 
-    let totalCost = 0;
-    let totalTokens = 0;
-
-    const labels = [];
-    const costs = [];
-    const providerTotals = {};
-
     const tbody = document.getElementById('rows');
     const providerTbody = document.getElementById('providerRows');
+    const startDateInput = document.getElementById('startDate');
+    const endDateInput = document.getElementById('endDate');
+    const resetFilterButton = document.getElementById('resetFilter');
+    const rangeSummary = document.getElementById('rangeSummary');
+    const costChartCanvas = document.getElementById('costChart');
+    let costChart = null;
 
     function num(v) {
       return Number(v || 0);
@@ -93,67 +163,140 @@ fetch('./ai-usage.json')
       return '$' + num(v).toFixed(2);
     }
 
-    items.forEach(x => {
-      const date = x.period || x.date || x.day || x.timestamp || '';
-
-      const input = num(x.inputTokens || x.input_tokens || x.input);
-      const output = num(x.outputTokens || x.output_tokens || x.output);
-      const cacheRead = num(x.cacheReadTokens);
-      const cacheCreation = num(x.cacheCreationTokens);
-      const cacheTotal = cacheRead + cacheCreation;
-
-      const total = num(x.totalTokens || x.total_tokens || input + output + cacheTotal);
-      const cost = num(x.totalCost || x.total_cost || x.cost);
-
-      const models = Array.isArray(x.modelsUsed) ? x.modelsUsed.join(', ') : (x.modelsUsed || '');
-
-      totalCost += cost;
-      totalTokens += total;
-
-      labels.push(date);
-      costs.push(cost);
-
-      if (Array.isArray(x.modelBreakdowns)) {
-        x.modelBreakdowns.forEach(m => {
-          const name = m.modelName || m.model || m.provider || 'unknown';
-
-          if (!providerTotals[name]) {
-            providerTotals[name] = {
-              input: 0,
-              output: 0,
-              cache: 0,
-              total: 0,
-              cost: 0
-            };
-          }
-
-          const mInput = num(m.inputTokens || m.input_tokens || m.input);
-          const mOutput = num(m.outputTokens || m.output_tokens || m.output);
-          const mCache = num(m.cacheReadTokens) + num(m.cacheCreationTokens);
-          const mTotal = num(m.totalTokens || m.total_tokens || mInput + mOutput + mCache);
-          const mCost = num(m.totalCost || m.total_cost || m.cost);
-
-          providerTotals[name].input += mInput;
-          providerTotals[name].output += mOutput;
-          providerTotals[name].cache += mCache;
-          providerTotals[name].total += mTotal;
-          providerTotals[name].cost += mCost;
-        });
-      } else {
-        const name = models || x.agent || 'all';
-
-        if (!providerTotals[name]) {
-          providerTotals[name] = { input: 0, output: 0, cache: 0, total: 0, cost: 0 };
+    function getEfficiency(outputTokens, cost) {
+        if (cost === 0 && outputTokens > 0) {
+          return {
+            score: 100,
+            label: 'Free / Local',
+            color: '#22c55e'
+          };
         }
-
-        providerTotals[name].input += input;
-        providerTotals[name].output += output;
-        providerTotals[name].cache += cacheTotal;
-        providerTotals[name].total += total;
-        providerTotals[name].cost += cost;
+      
+        if (cost === 0 && outputTokens === 0) {
+          return {
+            score: 0,
+            label: 'No output',
+            color: '#9ca3af'
+          };
+        }
+      
+        const outputPerDollar = outputTokens / cost;
+        const score = Math.min(100, Math.round(outputPerDollar / 100));
+      
+        let label = 'Very Expensive';
+        let color = '#ef4444';
+      
+        if (score >= 85) {
+          label = 'Excellent';
+          color = '#22c55e';
+        } else if (score >= 70) {
+          label = 'Good';
+          color = '#84cc16';
+        } else if (score >= 50) {
+          label = 'Medium';
+          color = '#f59e0b';
+        } else if (score >= 30) {
+          label = 'Expensive';
+          color = '#f97316';
+        }
+      
+        return { score, label, color };
       }
 
-      tbody.innerHTML += `
+    function normalizeDate(x) {
+      const date = x.period || x.date || x.day || x.timestamp || '';
+      return typeof date === 'string' ? date.slice(0, 10) : '';
+    }
+
+    const normalizedItems = items
+      .map(x => ({ ...x, _date: normalizeDate(x) }))
+      .filter(x => x._date);
+
+    const allDates = normalizedItems.map(x => x._date).sort();
+    const minDate = allDates[0] || '';
+    const maxDate = allDates[allDates.length - 1] || '';
+
+    startDateInput.value = minDate;
+    endDateInput.value = maxDate;
+
+    function getFilteredItems() {
+      let start = startDateInput.value || minDate;
+      let end = endDateInput.value || maxDate;
+
+      if (start && end && start > end) {
+        [start, end] = [end, start];
+        startDateInput.value = start;
+        endDateInput.value = end;
+      }
+
+      return normalizedItems.filter(x => x._date >= start && x._date <= end);
+    }
+
+    function render() {
+      const filteredItems = getFilteredItems();
+
+      let totalCost = 0;
+      let totalTokens = 0;
+      const labels = [];
+      const costs = [];
+      const providerTotals = {};
+
+      tbody.innerHTML = '';
+      providerTbody.innerHTML = '';
+
+      filteredItems.forEach(x => {
+        const date = x._date;
+        const input = num(x.inputTokens || x.input_tokens || x.input);
+        const output = num(x.outputTokens || x.output_tokens || x.output);
+        const cacheRead = num(x.cacheReadTokens);
+        const cacheCreation = num(x.cacheCreationTokens);
+        const cacheTotal = cacheRead + cacheCreation;
+
+        const total = num(x.totalTokens || x.total_tokens || input + output + cacheTotal);
+        const cost = num(x.totalCost || x.total_cost || x.cost);
+        const models = Array.isArray(x.modelsUsed) ? x.modelsUsed.join(', ') : (x.modelsUsed || '');
+
+        totalCost += cost;
+        totalTokens += total;
+
+        labels.push(date);
+        costs.push(cost);
+
+        if (Array.isArray(x.modelBreakdowns)) {
+          x.modelBreakdowns.forEach(m => {
+            const name = m.modelName || m.model || m.provider || 'unknown';
+
+            if (!providerTotals[name]) {
+              providerTotals[name] = { input: 0, output: 0, cache: 0, total: 0, cost: 0 };
+            }
+
+            const mInput = num(m.inputTokens || m.input_tokens || m.input);
+            const mOutput = num(m.outputTokens || m.output_tokens || m.output);
+            const mCache = num(m.cacheReadTokens) + num(m.cacheCreationTokens);
+            const mTotal = num(m.totalTokens || m.total_tokens || mInput + mOutput + mCache);
+            const mCost = num(m.totalCost || m.total_cost || m.cost);
+
+            providerTotals[name].input += mInput;
+            providerTotals[name].output += mOutput;
+            providerTotals[name].cache += mCache;
+            providerTotals[name].total += mTotal;
+            providerTotals[name].cost += mCost;
+          });
+        } else {
+          const name = models || x.agent || 'all';
+
+          if (!providerTotals[name]) {
+            providerTotals[name] = { input: 0, output: 0, cache: 0, total: 0, cost: 0 };
+          }
+
+          providerTotals[name].input += input;
+          providerTotals[name].output += output;
+          providerTotals[name].cache += cacheTotal;
+          providerTotals[name].total += total;
+          providerTotals[name].cost += cost;
+        }
+
+        tbody.innerHTML += `
         <tr>
           <td>${date}</td>
           <td>${models}</td>
@@ -164,15 +307,15 @@ fetch('./ai-usage.json')
           <td>${money(cost)}</td>
         </tr>
       `;
-    });
+      });
 
     const providerNames = Object.keys(providerTotals);
-    const providerCosts = providerNames.map(name => providerTotals[name].cost);
 
     providerNames
       .sort((a, b) => providerTotals[b].cost - providerTotals[a].cost)
       .forEach(name => {
         const p = providerTotals[name];
+        const efficiency = getEfficiency(p.output, p.cost);
 
         providerTbody.innerHTML += `
           <tr>
@@ -182,22 +325,48 @@ fetch('./ai-usage.json')
             <td>${fmt(p.cache)}</td>
             <td>${fmt(p.total)}</td>
             <td>${money(p.cost)}</td>
+            <td>
+              <span class="badge" style="background:${efficiency.color}">
+                ${efficiency.score}/100
+              </span>
+              <br>
+              <small>${efficiency.label}</small>
+            </td>
           </tr>
         `;
       });
 
-    document.getElementById('totalCost').textContent = money(totalCost);
-    document.getElementById('totalTokens').textContent = fmt(totalTokens);
-    document.getElementById('totalDays').textContent = items.length;
-    document.getElementById('totalProviders').textContent = providerNames.length;
+      document.getElementById('totalCost').textContent = money(totalCost);
+      document.getElementById('totalTokens').textContent = fmt(totalTokens);
+      document.getElementById('totalDays').textContent = filteredItems.length;
+      document.getElementById('totalProviders').textContent = providerNames.length;
+      rangeSummary.textContent = filteredItems.length
+        ? `${filteredItems.length} of ${normalizedItems.length} day(s) shown from ${startDateInput.value || minDate} to ${endDateInput.value || maxDate}`
+        : 'No data for selected range';
 
-    new Chart(document.getElementById('costChart'), {
-      type: 'bar',
-      data: {
-        labels,
-        datasets: [{ label: 'Daily cost', data: costs }]
+      if (costChart) {
+        costChart.destroy();
       }
+
+      costChart = new Chart(costChartCanvas, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{ label: 'Daily cost', data: costs }]
+        }
+      });
+    }
+
+    resetFilterButton.addEventListener('click', () => {
+      startDateInput.value = minDate;
+      endDateInput.value = maxDate;
+      render();
     });
+
+    startDateInput.addEventListener('change', render);
+    endDateInput.addEventListener('change', render);
+
+    render();
   });
 </script>
 </body>
