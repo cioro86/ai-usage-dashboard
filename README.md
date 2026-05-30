@@ -136,7 +136,7 @@ ai-usage-dashboard/
 
 ## Notes
 
-- Dashboard auto-refreshes every 5 minutes
+- Dashboard auto-refreshes every 1 minute
 - Usage values are API-equivalent estimates
 - Subscription plans may not reflect actual billed cost
 - Works globally across multiple repositories and coding tools

@@ -4,5 +4,5 @@ cd "$(dirname "$0")/.."
 
 while true; do
   ccusage daily --json > ai-usage.json
-  sleep 300
+  sleep 60
 done
