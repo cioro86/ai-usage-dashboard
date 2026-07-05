@@ -2,7 +2,6 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <meta http-equiv="refresh" content="300">
   <title>AI Usage Dashboard</title>
   <link rel="icon" href="./favicon.ico">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -86,7 +85,7 @@
 </head>
 <body>
   <h1>AI Usage Dashboard</h1>
-  <p>Generated from ccusage daily JSON export. Auto-refresh every 5 minutes.</p>
+  <p>Generated from ccusage daily JSON export. Data refreshes every 5 minutes without reloading the page.</p>
 
   <div class="controls">
     <div class="control">
@@ -155,228 +154,244 @@
   </table>
 
 <script>
-fetch('./ai-usage.json')
-  .then(r => r.json())
-  .then(data => {
-    const rows = data.daily || data;
-    const items = Array.isArray(rows) ? rows : Object.values(rows);
+  const STORAGE_KEY = 'ai-usage-dashboard-range';
+  const REFRESH_MS = 5 * 60 * 1000;
+  const rangePresetSelect = document.getElementById('rangePreset');
+  const startDateInput = document.getElementById('startDate');
+  const endDateInput = document.getElementById('endDate');
+  const resetFilterButton = document.getElementById('resetFilter');
+  const rangeSummary = document.getElementById('rangeSummary');
+  const tbody = document.getElementById('rows');
+  const providerTbody = document.getElementById('providerRows');
+  const costChartCanvas = document.getElementById('costChart');
+  const totalCostEl = document.getElementById('totalCost');
+  const totalTokensEl = document.getElementById('totalTokens');
+  const totalDaysEl = document.getElementById('totalDays');
+  const totalProvidersEl = document.getElementById('totalProviders');
+  let costChart = null;
+  let normalizedItems = [];
+  let minDate = '';
+  let maxDate = '';
+  let initialised = false;
+  let refreshInFlight = false;
+  let refreshTimer = null;
 
-    const tbody = document.getElementById('rows');
-    const providerTbody = document.getElementById('providerRows');
-    const rangePresetSelect = document.getElementById('rangePreset');
-    const startDateInput = document.getElementById('startDate');
-    const endDateInput = document.getElementById('endDate');
-    const resetFilterButton = document.getElementById('resetFilter');
-    const rangeSummary = document.getElementById('rangeSummary');
-    const costChartCanvas = document.getElementById('costChart');
-    let costChart = null;
-    const STORAGE_KEY = 'ai-usage-dashboard-range';
+  function num(v) {
+    return Number(v || 0);
+  }
 
-    function num(v) {
-      return Number(v || 0);
+  function fmt(v) {
+    return num(v).toLocaleString();
+  }
+
+  function money(v) {
+    return '$' + num(v).toFixed(2);
+  }
+
+  function getEfficiency(outputTokens, cost) {
+    if (cost === 0 && outputTokens > 0) {
+      return { score: 100, label: 'Free / Local', color: '#22c55e' };
     }
 
-    function fmt(v) {
-      return num(v).toLocaleString();
+    if (cost === 0 && outputTokens === 0) {
+      return { score: 0, label: 'No output', color: '#9ca3af' };
     }
 
-    function money(v) {
-      return '$' + num(v).toFixed(2);
+    const outputPerDollar = outputTokens / cost;
+    const score = Math.min(100, Math.round(outputPerDollar / 100));
+    let label = 'Very Expensive';
+    let color = '#ef4444';
+
+    if (score >= 85) {
+      label = 'Excellent';
+      color = '#22c55e';
+    } else if (score >= 70) {
+      label = 'Good';
+      color = '#84cc16';
+    } else if (score >= 50) {
+      label = 'Medium';
+      color = '#f59e0b';
+    } else if (score >= 30) {
+      label = 'Expensive';
+      color = '#f97316';
     }
 
-    function getEfficiency(outputTokens, cost) {
-        if (cost === 0 && outputTokens > 0) {
-          return {
-            score: 100,
-            label: 'Free / Local',
-            color: '#22c55e'
-          };
-        }
-      
-        if (cost === 0 && outputTokens === 0) {
-          return {
-            score: 0,
-            label: 'No output',
-            color: '#9ca3af'
-          };
-        }
-      
-        const outputPerDollar = outputTokens / cost;
-        const score = Math.min(100, Math.round(outputPerDollar / 100));
-      
-        let label = 'Very Expensive';
-        let color = '#ef4444';
-      
-        if (score >= 85) {
-          label = 'Excellent';
-          color = '#22c55e';
-        } else if (score >= 70) {
-          label = 'Good';
-          color = '#84cc16';
-        } else if (score >= 50) {
-          label = 'Medium';
-          color = '#f59e0b';
-        } else if (score >= 30) {
-          label = 'Expensive';
-          color = '#f97316';
-        }
-      
-        return { score, label, color };
+    return { score, label, color };
+  }
+
+  function normalizeDate(x) {
+    const date = x.period || x.date || x.day || x.timestamp || '';
+    return typeof date === 'string' ? date.slice(0, 10) : '';
+  }
+
+  function todayIso() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  function shiftDays(isoDate, days) {
+    const [year, month, day] = isoDate.split('-').map(Number);
+    const date = new Date(year, month - 1, day);
+    date.setDate(date.getDate() + days);
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  function saveState() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      preset: rangePresetSelect.value,
+      start: startDateInput.value,
+      end: endDateInput.value
+    }));
+  }
+
+  function setRange(start, end, preset = 'custom', shouldPersist = true) {
+    startDateInput.value = start;
+    endDateInput.value = end;
+    rangePresetSelect.value = preset;
+    if (shouldPersist) {
+      saveState();
+    }
+  }
+
+  function applyPreset(preset, shouldPersist = true) {
+    const today = todayIso();
+
+    if (preset === 'today') {
+      setRange(today, today, preset, shouldPersist);
+      return;
+    }
+
+    if (preset === 'lastWeek') {
+      setRange(shiftDays(today, -6), today, preset, shouldPersist);
+      return;
+    }
+
+    if (preset === 'lastMonth') {
+      setRange(shiftDays(today, -29), today, preset, shouldPersist);
+      return;
+    }
+
+    if (preset === 'all') {
+      setRange(minDate, maxDate, preset, shouldPersist);
+      return;
+    }
+
+    rangePresetSelect.value = 'custom';
+    if (shouldPersist) {
+      saveState();
+    }
+  }
+
+  function loadState() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) {
+        rangePresetSelect.value = 'all';
+        setRange(minDate, maxDate, 'all', false);
+        return;
       }
 
-    function normalizeDate(x) {
-      const date = x.period || x.date || x.day || x.timestamp || '';
-      return typeof date === 'string' ? date.slice(0, 10) : '';
+      const saved = JSON.parse(raw);
+      const preset = ['all', 'today', 'lastWeek', 'lastMonth', 'custom'].includes(saved.preset)
+        ? saved.preset
+        : 'all';
+
+      rangePresetSelect.value = preset;
+
+      if (preset === 'custom') {
+        startDateInput.value = saved.start || minDate;
+        endDateInput.value = saved.end || maxDate;
+        return;
+      }
+
+      applyPreset(preset, false);
+    } catch (_) {
+      rangePresetSelect.value = 'all';
+      setRange(minDate, maxDate, 'all', false);
     }
+  }
 
-    function todayIso() {
-      const now = new Date();
-      const year = now.getFullYear();
-      const month = String(now.getMonth() + 1).padStart(2, '0');
-      const day = String(now.getDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
-    }
+  function getFilteredItems() {
+    let start = startDateInput.value || minDate;
+    let end = endDateInput.value || maxDate;
 
-    function shiftDays(isoDate, days) {
-      const [year, month, day] = isoDate.split('-').map(Number);
-      const date = new Date(year, month - 1, day);
-      date.setDate(date.getDate() + days);
-      const y = date.getFullYear();
-      const m = String(date.getMonth() + 1).padStart(2, '0');
-      const d = String(date.getDate()).padStart(2, '0');
-      return `${y}-${m}-${d}`;
-    }
-
-    const normalizedItems = items
-      .map(x => ({ ...x, _date: normalizeDate(x) }))
-      .filter(x => x._date);
-
-    const allDates = normalizedItems.map(x => x._date).sort();
-    const minDate = allDates[0] || '';
-    const maxDate = allDates[allDates.length - 1] || '';
-
-    startDateInput.value = minDate;
-    endDateInput.value = maxDate;
-
-    function saveState() {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        preset: rangePresetSelect.value,
-        start: startDateInput.value,
-        end: endDateInput.value
-      }));
-    }
-
-    function setRange(start, end, preset = 'custom') {
+    if (start && end && start > end) {
+      [start, end] = [end, start];
       startDateInput.value = start;
       endDateInput.value = end;
-      rangePresetSelect.value = preset;
-      saveState();
     }
 
-    function applyPreset(preset) {
-      const today = todayIso();
-      if (preset === 'today') {
-        setRange(today, today, preset);
-        return;
-      }
+    return normalizedItems.filter(x => x._date >= start && x._date <= end);
+  }
 
-      if (preset === 'lastWeek') {
-        setRange(shiftDays(today, -6), today, preset);
-        return;
-      }
+  function render() {
+    const filteredItems = getFilteredItems();
+    let totalCost = 0;
+    let totalTokens = 0;
+    const labels = [];
+    const costs = [];
+    const providerTotals = {};
 
-      if (preset === 'lastMonth') {
-        setRange(shiftDays(today, -29), today, preset);
-        return;
-      }
+    tbody.innerHTML = '';
+    providerTbody.innerHTML = '';
 
-      if (preset === 'all') {
-        setRange(minDate, maxDate, preset);
-        return;
-      }
+    filteredItems.forEach(x => {
+      const date = x._date;
+      const input = num(x.inputTokens || x.input_tokens || x.input);
+      const output = num(x.outputTokens || x.output_tokens || x.output);
+      const cacheRead = num(x.cacheReadTokens);
+      const cacheCreation = num(x.cacheCreationTokens);
+      const cacheTotal = cacheRead + cacheCreation;
+      const total = num(x.totalTokens || x.total_tokens || input + output + cacheTotal);
+      const cost = num(x.totalCost || x.total_cost || x.cost);
+      const models = Array.isArray(x.modelsUsed) ? x.modelsUsed.join(', ') : (x.modelsUsed || '');
 
-      rangePresetSelect.value = 'custom';
-      saveState();
-    }
+      totalCost += cost;
+      totalTokens += total;
+      labels.push(date);
+      costs.push(cost);
 
-    function getFilteredItems() {
-      let start = startDateInput.value || minDate;
-      let end = endDateInput.value || maxDate;
-
-      if (start && end && start > end) {
-        [start, end] = [end, start];
-        startDateInput.value = start;
-        endDateInput.value = end;
-      }
-
-      return normalizedItems.filter(x => x._date >= start && x._date <= end);
-    }
-
-    function render() {
-      const filteredItems = getFilteredItems();
-
-      let totalCost = 0;
-      let totalTokens = 0;
-      const labels = [];
-      const costs = [];
-      const providerTotals = {};
-
-      tbody.innerHTML = '';
-      providerTbody.innerHTML = '';
-
-      filteredItems.forEach(x => {
-        const date = x._date;
-        const input = num(x.inputTokens || x.input_tokens || x.input);
-        const output = num(x.outputTokens || x.output_tokens || x.output);
-        const cacheRead = num(x.cacheReadTokens);
-        const cacheCreation = num(x.cacheCreationTokens);
-        const cacheTotal = cacheRead + cacheCreation;
-
-        const total = num(x.totalTokens || x.total_tokens || input + output + cacheTotal);
-        const cost = num(x.totalCost || x.total_cost || x.cost);
-        const models = Array.isArray(x.modelsUsed) ? x.modelsUsed.join(', ') : (x.modelsUsed || '');
-
-        totalCost += cost;
-        totalTokens += total;
-
-        labels.push(date);
-        costs.push(cost);
-
-        if (Array.isArray(x.modelBreakdowns)) {
-          x.modelBreakdowns.forEach(m => {
-            const name = m.modelName || m.model || m.provider || 'unknown';
-
-            if (!providerTotals[name]) {
-              providerTotals[name] = { input: 0, output: 0, cache: 0, total: 0, cost: 0 };
-            }
-
-            const mInput = num(m.inputTokens || m.input_tokens || m.input);
-            const mOutput = num(m.outputTokens || m.output_tokens || m.output);
-            const mCache = num(m.cacheReadTokens) + num(m.cacheCreationTokens);
-            const mTotal = num(m.totalTokens || m.total_tokens || mInput + mOutput + mCache);
-            const mCost = num(m.totalCost || m.total_cost || m.cost);
-
-            providerTotals[name].input += mInput;
-            providerTotals[name].output += mOutput;
-            providerTotals[name].cache += mCache;
-            providerTotals[name].total += mTotal;
-            providerTotals[name].cost += mCost;
-          });
-        } else {
-          const name = models || x.agent || 'all';
+      if (Array.isArray(x.modelBreakdowns)) {
+        x.modelBreakdowns.forEach(m => {
+          const name = m.modelName || m.model || m.provider || 'unknown';
 
           if (!providerTotals[name]) {
             providerTotals[name] = { input: 0, output: 0, cache: 0, total: 0, cost: 0 };
           }
 
-          providerTotals[name].input += input;
-          providerTotals[name].output += output;
-          providerTotals[name].cache += cacheTotal;
-          providerTotals[name].total += total;
-          providerTotals[name].cost += cost;
+          const mInput = num(m.inputTokens || m.input_tokens || m.input);
+          const mOutput = num(m.outputTokens || m.output_tokens || m.output);
+          const mCache = num(m.cacheReadTokens) + num(m.cacheCreationTokens);
+          const mTotal = num(m.totalTokens || m.total_tokens || mInput + mOutput + mCache);
+          const mCost = num(m.totalCost || m.total_cost || m.cost);
+
+          providerTotals[name].input += mInput;
+          providerTotals[name].output += mOutput;
+          providerTotals[name].cache += mCache;
+          providerTotals[name].total += mTotal;
+          providerTotals[name].cost += mCost;
+        });
+      } else {
+        const name = models || x.agent || 'all';
+
+        if (!providerTotals[name]) {
+          providerTotals[name] = { input: 0, output: 0, cache: 0, total: 0, cost: 0 };
         }
 
-        tbody.innerHTML += `
+        providerTotals[name].input += input;
+        providerTotals[name].output += output;
+        providerTotals[name].cache += cacheTotal;
+        providerTotals[name].total += total;
+        providerTotals[name].cost += cost;
+      }
+
+      tbody.innerHTML += `
         <tr>
           <td>${date}</td>
           <td>${models}</td>
@@ -387,7 +402,7 @@ fetch('./ai-usage.json')
           <td>${money(cost)}</td>
         </tr>
       `;
-      });
+    });
 
     const providerNames = Object.keys(providerTotals);
 
@@ -416,85 +431,98 @@ fetch('./ai-usage.json')
         `;
       });
 
-      document.getElementById('totalCost').textContent = money(totalCost);
-      document.getElementById('totalTokens').textContent = fmt(totalTokens);
-      document.getElementById('totalDays').textContent = filteredItems.length;
-      document.getElementById('totalProviders').textContent = providerNames.length;
-      rangeSummary.textContent = filteredItems.length
-        ? `${filteredItems.length} of ${normalizedItems.length} day(s) shown from ${startDateInput.value || minDate} to ${endDateInput.value || maxDate}`
-        : 'No data for selected range';
+    totalCostEl.textContent = money(totalCost);
+    totalTokensEl.textContent = fmt(totalTokens);
+    totalDaysEl.textContent = filteredItems.length;
+    totalProvidersEl.textContent = providerNames.length;
+    rangeSummary.textContent = filteredItems.length
+      ? `${filteredItems.length} of ${normalizedItems.length} day(s) shown from ${startDateInput.value || minDate} to ${endDateInput.value || maxDate}`
+      : 'No data for selected range';
 
-      if (costChart) {
-        costChart.destroy();
-      }
-
-      costChart = new Chart(costChartCanvas, {
-        type: 'bar',
-        data: {
-          labels,
-          datasets: [{ label: 'Daily cost', data: costs }]
-        }
-      });
+    if (costChart) {
+      costChart.destroy();
     }
 
-    function restoreState() {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (!raw) {
-          rangePresetSelect.value = 'all';
-          return;
-        }
-
-        const saved = JSON.parse(raw);
-        if (saved.preset && ['all', 'today', 'lastWeek', 'lastMonth', 'custom'].includes(saved.preset)) {
-          rangePresetSelect.value = saved.preset;
-        }
-
-        if (saved.start) startDateInput.value = saved.start;
-        if (saved.end) endDateInput.value = saved.end;
-
-        if (rangePresetSelect.value !== 'custom') {
-          applyPreset(rangePresetSelect.value);
-          return;
-        }
-
-        if (startDateInput.value && endDateInput.value) {
-          return;
-        }
-      } catch (_) {
-        rangePresetSelect.value = 'all';
+    costChart = new Chart(costChartCanvas, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{ label: 'Daily cost', data: costs }]
       }
+    });
+  }
 
-      rangePresetSelect.value = 'all';
-      startDateInput.value = minDate;
-      endDateInput.value = maxDate;
+  function syncRangeAfterDataRefresh() {
+    if (rangePresetSelect.value === 'custom') {
+      return;
     }
 
-    restoreState();
+    applyPreset(rangePresetSelect.value || 'all', false);
+  }
 
-    rangePresetSelect.addEventListener('change', () => {
-      applyPreset(rangePresetSelect.value);
-      render();
-    });
+  function normalizeAndStore(data) {
+    const rows = data.daily || data;
+    const items = Array.isArray(rows) ? rows : Object.values(rows);
 
-    resetFilterButton.addEventListener('click', () => {
-      setRange(minDate, maxDate, 'all');
-      render();
-    });
+    normalizedItems = items
+      .map(x => ({ ...x, _date: normalizeDate(x) }))
+      .filter(x => x._date);
 
-    startDateInput.addEventListener('change', () => {
-      rangePresetSelect.value = 'custom';
-      saveState();
-      render();
-    });
-    endDateInput.addEventListener('change', () => {
-      rangePresetSelect.value = 'custom';
-      saveState();
-      render();
-    });
+    const allDates = normalizedItems.map(x => x._date).sort();
+    minDate = allDates[0] || '';
+    maxDate = allDates[allDates.length - 1] || '';
+  }
 
+  async function loadData() {
+    if (refreshInFlight) return;
+    refreshInFlight = true;
+
+    try {
+      const response = await fetch(`./ai-usage.json?t=${Date.now()}`, { cache: 'no-store' });
+      const data = await response.json();
+
+      normalizeAndStore(data);
+
+      if (!initialised) {
+        loadState();
+        initialised = true;
+      } else {
+        syncRangeAfterDataRefresh();
+      }
+
+      render();
+    } catch (error) {
+      rangeSummary.textContent = 'Unable to refresh data right now';
+      console.error('Failed to load dashboard data', error);
+    } finally {
+      refreshInFlight = false;
+    }
+  }
+
+  rangePresetSelect.addEventListener('change', () => {
+    applyPreset(rangePresetSelect.value);
     render();
   });
+
+  resetFilterButton.addEventListener('click', () => {
+    setRange(minDate, maxDate, 'all');
+    render();
+  });
+
+  startDateInput.addEventListener('change', () => {
+    rangePresetSelect.value = 'custom';
+    saveState();
+    render();
+  });
+
+  endDateInput.addEventListener('change', () => {
+    rangePresetSelect.value = 'custom';
+    saveState();
+    render();
+  });
+
+  loadData();
+  refreshTimer = setInterval(loadData, REFRESH_MS);
 </script>
 </body>
 </html>
