@@ -38,6 +38,14 @@
       font: inherit;
       background: #fff;
     }
+    .control select {
+      padding: 10px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      font: inherit;
+      background: #fff;
+      min-width: 160px;
+    }
     .controls button {
       padding: 10px 14px;
       border: 0;
@@ -81,6 +89,16 @@
   <p>Generated from ccusage daily JSON export. Auto-refresh every 5 minutes.</p>
 
   <div class="controls">
+    <div class="control">
+      <label for="rangePreset">Quick range</label>
+      <select id="rangePreset">
+        <option value="all">All</option>
+        <option value="today">Today</option>
+        <option value="lastWeek">Last week</option>
+        <option value="lastMonth">Last month</option>
+        <option value="custom">Custom</option>
+      </select>
+    </div>
     <div class="control">
       <label for="startDate">From</label>
       <input type="date" id="startDate" />
@@ -145,12 +163,14 @@ fetch('./ai-usage.json')
 
     const tbody = document.getElementById('rows');
     const providerTbody = document.getElementById('providerRows');
+    const rangePresetSelect = document.getElementById('rangePreset');
     const startDateInput = document.getElementById('startDate');
     const endDateInput = document.getElementById('endDate');
     const resetFilterButton = document.getElementById('resetFilter');
     const rangeSummary = document.getElementById('rangeSummary');
     const costChartCanvas = document.getElementById('costChart');
     let costChart = null;
+    const STORAGE_KEY = 'ai-usage-dashboard-range';
 
     function num(v) {
       return Number(v || 0);
@@ -209,6 +229,24 @@ fetch('./ai-usage.json')
       return typeof date === 'string' ? date.slice(0, 10) : '';
     }
 
+    function todayIso() {
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = String(now.getMonth() + 1).padStart(2, '0');
+      const day = String(now.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+
+    function shiftDays(isoDate, days) {
+      const [year, month, day] = isoDate.split('-').map(Number);
+      const date = new Date(year, month - 1, day);
+      date.setDate(date.getDate() + days);
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
     const normalizedItems = items
       .map(x => ({ ...x, _date: normalizeDate(x) }))
       .filter(x => x._date);
@@ -219,6 +257,47 @@ fetch('./ai-usage.json')
 
     startDateInput.value = minDate;
     endDateInput.value = maxDate;
+
+    function saveState() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        preset: rangePresetSelect.value,
+        start: startDateInput.value,
+        end: endDateInput.value
+      }));
+    }
+
+    function setRange(start, end, preset = 'custom') {
+      startDateInput.value = start;
+      endDateInput.value = end;
+      rangePresetSelect.value = preset;
+      saveState();
+    }
+
+    function applyPreset(preset) {
+      const today = todayIso();
+      if (preset === 'today') {
+        setRange(today, today, preset);
+        return;
+      }
+
+      if (preset === 'lastWeek') {
+        setRange(shiftDays(today, -6), today, preset);
+        return;
+      }
+
+      if (preset === 'lastMonth') {
+        setRange(shiftDays(today, -29), today, preset);
+        return;
+      }
+
+      if (preset === 'all') {
+        setRange(minDate, maxDate, preset);
+        return;
+      }
+
+      rangePresetSelect.value = 'custom';
+      saveState();
+    }
 
     function getFilteredItems() {
       let start = startDateInput.value || minDate;
@@ -358,14 +437,61 @@ fetch('./ai-usage.json')
       });
     }
 
-    resetFilterButton.addEventListener('click', () => {
+    function restoreState() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) {
+          rangePresetSelect.value = 'all';
+          return;
+        }
+
+        const saved = JSON.parse(raw);
+        if (saved.preset && ['all', 'today', 'lastWeek', 'lastMonth', 'custom'].includes(saved.preset)) {
+          rangePresetSelect.value = saved.preset;
+        }
+
+        if (saved.start) startDateInput.value = saved.start;
+        if (saved.end) endDateInput.value = saved.end;
+
+        if (rangePresetSelect.value !== 'custom') {
+          applyPreset(rangePresetSelect.value);
+          return;
+        }
+
+        if (startDateInput.value && endDateInput.value) {
+          return;
+        }
+      } catch (_) {
+        rangePresetSelect.value = 'all';
+      }
+
+      rangePresetSelect.value = 'all';
       startDateInput.value = minDate;
       endDateInput.value = maxDate;
+    }
+
+    restoreState();
+
+    rangePresetSelect.addEventListener('change', () => {
+      applyPreset(rangePresetSelect.value);
       render();
     });
 
-    startDateInput.addEventListener('change', render);
-    endDateInput.addEventListener('change', render);
+    resetFilterButton.addEventListener('click', () => {
+      setRange(minDate, maxDate, 'all');
+      render();
+    });
+
+    startDateInput.addEventListener('change', () => {
+      rangePresetSelect.value = 'custom';
+      saveState();
+      render();
+    });
+    endDateInput.addEventListener('change', () => {
+      rangePresetSelect.value = 'custom';
+      saveState();
+      render();
+    });
 
     render();
   });
