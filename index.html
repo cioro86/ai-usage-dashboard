@@ -131,11 +131,15 @@
         <th>Cache Tokens</th>
         <th>Total Tokens</th>
         <th>Cost</th>
-        <th>Efficiency</th>
+        <th title="Score compared on a logarithmic scale against the range (min-max) of output-token/$ ratios observed across your models over the last 90 days. 100 = the most efficient model in the window, 0 = the least efficient. The log scale prevents a single very cheap model from crushing all the others toward the bottom.">Efficiency ⓘ</th>
       </tr>
     </thead>
     <tbody id="providerRows"></tbody>
   </table>
+  <small>
+    Efficiency: a 0-100 score on a logarithmic scale, calculated by comparing each model's output tokens per dollar against the range (minimum-maximum) observed across all models used in the last 90 days.
+    100 = the most efficient model in the window, 0 = the least efficient. "$/1M output tok" and "$/1M total tok" are the raw, non-normalized values (the second also includes input and cache tokens).
+  </small>
 
   <h2>Daily Usage</h2>
   <table>
@@ -156,6 +160,7 @@
 <script>
   const STORAGE_KEY = 'ai-usage-dashboard-range';
   const REFRESH_MS = 5 * 60 * 1000;
+  const REFERENCE_WINDOW_DAYS = 90;
   const rangePresetSelect = document.getElementById('rangePreset');
   const startDateInput = document.getElementById('startDate');
   const endDateInput = document.getElementById('endDate');
@@ -188,7 +193,7 @@
     return '$' + num(v).toFixed(2);
   }
 
-  function getEfficiency(outputTokens, cost) {
+  function getEfficiency(outputTokens, cost, referenceRange) {
     if (cost === 0 && outputTokens > 0) {
       return { score: 100, label: 'Free / Local', color: '#22c55e' };
     }
@@ -198,7 +203,22 @@
     }
 
     const outputPerDollar = outputTokens / cost;
-    const score = Math.min(100, Math.round(outputPerDollar / 100));
+    let score = 0;
+
+    if (outputPerDollar > 0 && referenceRange) {
+      const { minRatio, maxRatio } = referenceRange;
+
+      if (maxRatio <= minRatio) {
+        // Only one reference point in the window: nothing to compare against.
+        score = 100;
+      } else {
+        const logMin = Math.log(minRatio);
+        const logMax = Math.log(maxRatio);
+        const clampedLog = Math.min(logMax, Math.max(logMin, Math.log(outputPerDollar)));
+        score = Math.round(((clampedLog - logMin) / (logMax - logMin)) * 100);
+      }
+    }
+
     let label = 'Very Expensive';
     let color = '#ef4444';
 
@@ -217,6 +237,70 @@
     }
 
     return { score, label, color };
+  }
+
+  function aggregateProviderTotals(items) {
+    const totals = {};
+
+    items.forEach(x => {
+      const input = num(x.inputTokens || x.input_tokens || x.input);
+      const output = num(x.outputTokens || x.output_tokens || x.output);
+      const cacheTotal = num(x.cacheReadTokens) + num(x.cacheCreationTokens);
+      const total = num(x.totalTokens || x.total_tokens || input + output + cacheTotal);
+      const cost = num(x.totalCost || x.total_cost || x.cost);
+      const models = Array.isArray(x.modelsUsed) ? x.modelsUsed.join(', ') : (x.modelsUsed || '');
+
+      if (Array.isArray(x.modelBreakdowns)) {
+        x.modelBreakdowns.forEach(m => {
+          const name = m.modelName || m.model || m.provider || 'unknown';
+
+          if (!totals[name]) {
+            totals[name] = { input: 0, output: 0, cache: 0, total: 0, cost: 0 };
+          }
+
+          const mInput = num(m.inputTokens || m.input_tokens || m.input);
+          const mOutput = num(m.outputTokens || m.output_tokens || m.output);
+          const mCache = num(m.cacheReadTokens) + num(m.cacheCreationTokens);
+          const mTotal = num(m.totalTokens || m.total_tokens || mInput + mOutput + mCache);
+          const mCost = num(m.totalCost || m.total_cost || m.cost);
+
+          totals[name].input += mInput;
+          totals[name].output += mOutput;
+          totals[name].cache += mCache;
+          totals[name].total += mTotal;
+          totals[name].cost += mCost;
+        });
+      } else {
+        const name = models || x.agent || 'all';
+
+        if (!totals[name]) {
+          totals[name] = { input: 0, output: 0, cache: 0, total: 0, cost: 0 };
+        }
+
+        totals[name].input += input;
+        totals[name].output += output;
+        totals[name].cache += cacheTotal;
+        totals[name].total += total;
+        totals[name].cost += cost;
+      }
+    });
+
+    return totals;
+  }
+
+  function getReferenceRange(items) {
+    const cutoff = maxDate ? shiftDays(maxDate, -REFERENCE_WINDOW_DAYS) : '';
+    const windowItems = cutoff ? items.filter(x => x._date >= cutoff) : items;
+    const totals = aggregateProviderTotals(windowItems);
+    const ratios = Object.values(totals)
+      .filter(t => t.cost > 0 && t.output > 0)
+      .map(t => t.output / t.cost);
+
+    if (!ratios.length) {
+      return null;
+    }
+
+    return { minRatio: Math.min(...ratios), maxRatio: Math.max(...ratios) };
   }
 
   function normalizeDate(x) {
@@ -336,7 +420,10 @@
     let totalTokens = 0;
     const labels = [];
     const costs = [];
-    const providerTotals = {};
+    const providerTotals = aggregateProviderTotals(filteredItems);
+    // Reference range is always computed from a rolling window of the full history
+    // (not the current date filter), so a single visible model isn't auto-scored 100.
+    const referenceRange = getReferenceRange(normalizedItems);
 
     tbody.innerHTML = '';
     providerTbody.innerHTML = '';
@@ -345,9 +432,7 @@
       const date = x._date;
       const input = num(x.inputTokens || x.input_tokens || x.input);
       const output = num(x.outputTokens || x.output_tokens || x.output);
-      const cacheRead = num(x.cacheReadTokens);
-      const cacheCreation = num(x.cacheCreationTokens);
-      const cacheTotal = cacheRead + cacheCreation;
+      const cacheTotal = num(x.cacheReadTokens) + num(x.cacheCreationTokens);
       const total = num(x.totalTokens || x.total_tokens || input + output + cacheTotal);
       const cost = num(x.totalCost || x.total_cost || x.cost);
       const models = Array.isArray(x.modelsUsed) ? x.modelsUsed.join(', ') : (x.modelsUsed || '');
@@ -356,40 +441,6 @@
       totalTokens += total;
       labels.push(date);
       costs.push(cost);
-
-      if (Array.isArray(x.modelBreakdowns)) {
-        x.modelBreakdowns.forEach(m => {
-          const name = m.modelName || m.model || m.provider || 'unknown';
-
-          if (!providerTotals[name]) {
-            providerTotals[name] = { input: 0, output: 0, cache: 0, total: 0, cost: 0 };
-          }
-
-          const mInput = num(m.inputTokens || m.input_tokens || m.input);
-          const mOutput = num(m.outputTokens || m.output_tokens || m.output);
-          const mCache = num(m.cacheReadTokens) + num(m.cacheCreationTokens);
-          const mTotal = num(m.totalTokens || m.total_tokens || mInput + mOutput + mCache);
-          const mCost = num(m.totalCost || m.total_cost || m.cost);
-
-          providerTotals[name].input += mInput;
-          providerTotals[name].output += mOutput;
-          providerTotals[name].cache += mCache;
-          providerTotals[name].total += mTotal;
-          providerTotals[name].cost += mCost;
-        });
-      } else {
-        const name = models || x.agent || 'all';
-
-        if (!providerTotals[name]) {
-          providerTotals[name] = { input: 0, output: 0, cache: 0, total: 0, cost: 0 };
-        }
-
-        providerTotals[name].input += input;
-        providerTotals[name].output += output;
-        providerTotals[name].cache += cacheTotal;
-        providerTotals[name].total += total;
-        providerTotals[name].cost += cost;
-      }
 
       tbody.innerHTML += `
         <tr>
@@ -410,7 +461,9 @@
       .sort((a, b) => providerTotals[b].cost - providerTotals[a].cost)
       .forEach(name => {
         const p = providerTotals[name];
-        const efficiency = getEfficiency(p.output, p.cost);
+        const efficiency = getEfficiency(p.output, p.cost, referenceRange);
+        const outputCostPerMillion = p.output > 0 ? (p.cost / p.output) * 1e6 : null;
+        const totalCostPerMillion = p.total > 0 ? (p.cost / p.total) * 1e6 : null;
 
         providerTbody.innerHTML += `
           <tr>
@@ -426,6 +479,10 @@
               </span>
               <br>
               <small>${efficiency.label}</small>
+              <br>
+              <small>${outputCostPerMillion !== null ? money(outputCostPerMillion) : 'n/a'} / 1M output tok</small>
+              <br>
+              <small>${totalCostPerMillion !== null ? money(totalCostPerMillion) : 'n/a'} / 1M total tok (blended)</small>
             </td>
           </tr>
         `;
