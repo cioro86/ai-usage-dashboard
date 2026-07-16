@@ -68,9 +68,41 @@
     .card { background: white; padding: 18px; border-radius: 14px; box-shadow: 0 2px 12px #0001; min-width: 180px; }
     .value { font-size: 28px; font-weight: 700; }
     .chart-box { background: white; border-radius: 14px; padding: 16px; box-shadow: 0 2px 12px #0001; }
-    table { width: 100%; border-collapse: collapse; margin-top: 24px; background: white; border-radius: 14px; overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; margin-top: 24px; background: white; border-radius: 14px; overflow: visible; }
     th, td { padding: 12px; border-bottom: 1px solid #eee; text-align: left; vertical-align: middle; }
     th { background: #fafafa; }
+    th[data-tooltip] { position: relative; cursor: help; }
+    th[data-tooltip]::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      z-index: 10;
+      top: calc(100% + 8px);
+      left: 50%;
+      width: min(360px, 80vw);
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: #111827;
+      color: white;
+      font-size: 12px;
+      font-weight: 400;
+      line-height: 1.35;
+      text-align: left;
+      white-space: normal;
+      pointer-events: none;
+      opacity: 0;
+      transform: translate(-50%, -4px);
+      transition: opacity 120ms ease, transform 120ms ease;
+    }
+    th[data-tooltip]:hover::after,
+    th[data-tooltip]:focus-visible::after {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+    .info-icon {
+      color: #6b7280;
+      font-size: 12px;
+      margin-left: 3px;
+    }
     .badge {
       color: white;
       padding: 5px 10px;
@@ -80,6 +112,17 @@
       min-width: 72px;
       text-align: center;
     }
+    .score-badge {
+      color: white;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-weight: 700;
+      display: inline-block;
+      min-width: 72px;
+      text-align: center;
+      box-sizing: border-box;
+    }
+    .score-cell { text-align: center; white-space: nowrap; }
     small { color: #555; }
   </style>
 </head>
@@ -131,15 +174,13 @@
         <th>Cache Tokens</th>
         <th>Total Tokens</th>
         <th>Cost</th>
-        <th title="Score compared on a logarithmic scale against the range (min-max) of output-token/$ ratios observed across your models over the last 90 days. 100 = the most efficient model in the window, 0 = the least efficient. The log scale prevents a single very cheap model from crushing all the others toward the bottom.">Efficiency ⓘ</th>
+        <th data-tooltip="SWE-bench Verified resolved percentage for this model, when available." tabindex="0">SWE-bench Verified <span class="info-icon" aria-hidden="true">ⓘ</span></th>
+        <th data-tooltip="Efficiency compares output tokens per dollar against the other models used in the last 90 days. It is logarithmic: 100 is best and 0 is worst." tabindex="0">Efficiency <span class="info-icon" aria-hidden="true">ⓘ</span></th>
+        <th data-tooltip="Aggregate Score combines 70% consumption efficiency with 30% logarithmically scaled SWE-bench quality." tabindex="0">Aggregate Score <span class="info-icon" aria-hidden="true">ⓘ</span></th>
       </tr>
     </thead>
     <tbody id="providerRows"></tbody>
   </table>
-  <small>
-    Efficiency: a 0-100 score on a logarithmic scale, calculated by comparing each model's output tokens per dollar against the range (minimum-maximum) observed across all models used in the last 90 days.
-    100 = the most efficient model in the window, 0 = the least efficient. "$/1M output tok" and "$/1M total tok" are the raw, non-normalized values (the second also includes input and cache tokens).
-  </small>
 
   <h2>Daily Usage</h2>
   <table>
@@ -159,8 +200,11 @@
 
 <script>
   const STORAGE_KEY = 'ai-usage-dashboard-range';
+  const BENCHMARK_STORAGE_KEY = 'ai-usage-dashboard-swe-bench-verified-v1';
   const REFRESH_MS = 5 * 60 * 1000;
   const REFERENCE_WINDOW_DAYS = 90;
+  const EFFICIENCY_WEIGHT = 0.7;
+  const QUALITY_WEIGHT = 0.3;
   const rangePresetSelect = document.getElementById('rangePreset');
   const startDateInput = document.getElementById('startDate');
   const endDateInput = document.getElementById('endDate');
@@ -180,6 +224,7 @@
   let initialised = false;
   let refreshInFlight = false;
   let refreshTimer = null;
+  let benchmarkData = {};
 
   function num(v) {
     return Number(v || 0);
@@ -191,6 +236,32 @@
 
   function money(v) {
     return '$' + num(v).toFixed(2);
+  }
+
+  function normalizeModelName(name) {
+    return String(name || '').trim().toLowerCase().replace(/\s+/g, '-');
+  }
+
+  function getBenchmark(name) {
+    const value = benchmarkData[normalizeModelName(name)];
+    return typeof value === 'number' ? value : null;
+  }
+
+  function getAggregateScore(efficiencyScore, benchmark) {
+    if (benchmark === null) {
+      return null;
+    }
+
+    const qualityScore = (Math.log1p(benchmark) / Math.log(101)) * 100;
+    return Math.round((efficiencyScore * EFFICIENCY_WEIGHT + qualityScore * QUALITY_WEIGHT) * 10) / 10;
+  }
+
+  function getScoreColor(score) {
+    if (score >= 85) return '#22c55e';
+    if (score >= 70) return '#84cc16';
+    if (score >= 50) return '#f59e0b';
+    if (score >= 30) return '#f97316';
+    return '#ef4444';
   }
 
   function getEfficiency(outputTokens, cost, referenceRange) {
@@ -462,6 +533,8 @@
       .forEach(name => {
         const p = providerTotals[name];
         const efficiency = getEfficiency(p.output, p.cost, referenceRange);
+        const benchmark = getBenchmark(name);
+        const aggregateScore = getAggregateScore(efficiency.score, benchmark);
         const outputCostPerMillion = p.output > 0 ? (p.cost / p.output) * 1e6 : null;
         const totalCostPerMillion = p.total > 0 ? (p.cost / p.total) * 1e6 : null;
 
@@ -473,6 +546,11 @@
             <td>${fmt(p.cache)}</td>
             <td>${fmt(p.total)}</td>
             <td>${money(p.cost)}</td>
+            <td class="score-cell">
+              ${benchmark !== null
+                ? `<span class="score-badge" style="background:${getScoreColor(benchmark)}">${benchmark.toFixed(1)}%</span>`
+                : '—'}
+            </td>
             <td>
               <span class="badge" style="background:${efficiency.color}">
                 ${efficiency.score}/100
@@ -483,6 +561,11 @@
               <small>${outputCostPerMillion !== null ? money(outputCostPerMillion) : 'n/a'} / 1M output tok</small>
               <br>
               <small>${totalCostPerMillion !== null ? money(totalCostPerMillion) : 'n/a'} / 1M total tok (blended)</small>
+            </td>
+            <td class="score-cell">
+              ${aggregateScore !== null
+                ? `<span class="score-badge" style="background:${getScoreColor(aggregateScore)}">${aggregateScore.toFixed(1)}/100</span>`
+                : '—'}
             </td>
           </tr>
         `;
@@ -528,6 +611,24 @@
     const allDates = normalizedItems.map(x => x._date).sort();
     minDate = allDates[0] || '';
     maxDate = allDates[allDates.length - 1] || '';
+  }
+
+  async function loadBenchmarkData() {
+    try {
+      const cached = sessionStorage.getItem(BENCHMARK_STORAGE_KEY);
+      if (cached) {
+        benchmarkData = JSON.parse(cached);
+        return;
+      }
+
+      const response = await fetch('./swe-bench.json', { cache: 'no-store' });
+      const data = await response.json();
+      benchmarkData = data;
+      sessionStorage.setItem(BENCHMARK_STORAGE_KEY, JSON.stringify(data));
+    } catch (error) {
+      benchmarkData = {};
+      console.error('Failed to load SWE-bench Verified data', error);
+    }
   }
 
   async function loadData() {
@@ -578,8 +679,13 @@
     render();
   });
 
-  loadData();
-  refreshTimer = setInterval(loadData, REFRESH_MS);
+  async function init() {
+    await loadBenchmarkData();
+    await loadData();
+    refreshTimer = setInterval(loadData, REFRESH_MS);
+  }
+
+  init();
 </script>
 </body>
 </html>
