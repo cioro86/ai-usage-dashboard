@@ -1,0 +1,12 @@
+{
+  "_source": "Artificial Analysis Coding Index (via OpenRouter)",
+  "_sourceUrl": "https://openrouter.ai/api/v1/models",
+  "_lastSyncedAt": "2026-07-18T07:54:48.135577+00:00",
+  "gpt-5.5": 74.9,
+  "gpt-5.6-luna": 71.4,
+  "gpt-5.4-mini": 56.1,
+  "claude-sonnet-5": 71.5,
+  "claude-opus-4-8": 74.3,
+  "gpt-5.4": 71.1,
+  "claude-sonnet-4-6": 63
+}

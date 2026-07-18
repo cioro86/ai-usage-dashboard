@@ -174,9 +174,9 @@
         <th>Cache Tokens</th>
         <th>Total Tokens</th>
         <th>Cost</th>
-        <th data-tooltip="SWE-bench Verified resolved percentage for this model, when available." tabindex="0">SWE-bench Verified <span class="info-icon" aria-hidden="true">ⓘ</span></th>
+        <th data-tooltip="Artificial Analysis Coding Index (0-100) for this model, synced via OpenRouter when available." tabindex="0">Coding Index <span class="info-icon" aria-hidden="true">ⓘ</span></th>
         <th data-tooltip="Efficiency compares output tokens per dollar against the other models used in the last 90 days. It is logarithmic: 100 is best and 0 is worst." tabindex="0">Efficiency <span class="info-icon" aria-hidden="true">ⓘ</span></th>
-        <th data-tooltip="Aggregate Score combines 70% consumption efficiency with 30% logarithmically scaled SWE-bench quality." tabindex="0">Aggregate Score <span class="info-icon" aria-hidden="true">ⓘ</span></th>
+        <th data-tooltip="Aggregate Score combines 70% consumption efficiency with 30% logarithmically scaled Coding Index quality." tabindex="0">Aggregate Score <span class="info-icon" aria-hidden="true">ⓘ</span></th>
       </tr>
     </thead>
     <tbody id="providerRows"></tbody>
@@ -200,7 +200,7 @@
 
 <script>
   const STORAGE_KEY = 'ai-usage-dashboard-range';
-  const BENCHMARK_STORAGE_KEY = 'ai-usage-dashboard-swe-bench-verified-v1';
+  const BENCHMARK_STORAGE_KEY = 'ai-usage-dashboard-coding-index-v1';
   const REFRESH_MS = 5 * 60 * 1000;
   const REFERENCE_WINDOW_DAYS = 90;
   const EFFICIENCY_WEIGHT = 0.7;
@@ -548,7 +548,7 @@
             <td>${money(p.cost)}</td>
             <td class="score-cell">
               ${benchmark !== null
-                ? `<span class="score-badge" style="background:${getScoreColor(benchmark)}">${benchmark.toFixed(1)}%</span>`
+                ? `<span class="score-badge" style="background:${getScoreColor(benchmark)}">${benchmark.toFixed(1)}/100</span>`
                 : '—'}
             </td>
             <td>
@@ -621,13 +621,13 @@
         return;
       }
 
-      const response = await fetch('./swe-bench.json', { cache: 'no-store' });
+      const response = await fetch('./coding-index.json', { cache: 'no-store' });
       const data = await response.json();
       benchmarkData = data;
       sessionStorage.setItem(BENCHMARK_STORAGE_KEY, JSON.stringify(data));
     } catch (error) {
       benchmarkData = {};
-      console.error('Failed to load SWE-bench Verified data', error);
+      console.error('Failed to load Coding Index data', error);
     }
   }
 

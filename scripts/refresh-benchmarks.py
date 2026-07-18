@@ -10,8 +10,9 @@ from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent.parent
 USAGE_PATH = ROOT / "ai-usage.json"
-BENCHMARK_PATH = ROOT / "swe-bench.json"
-SOURCE_URL = "https://www.swebench.com/"
+BENCHMARK_PATH = ROOT / "coding-index.json"
+SOURCE_URL = "https://openrouter.ai/api/v1/models"
+SOURCE_LABEL = "Artificial Analysis Coding Index (via OpenRouter)"
 USER_AGENT = "ai-usage-dashboard/1.0"
 
 
@@ -20,10 +21,6 @@ def load_json(path, fallback):
         return json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return fallback
-
-
-def normalize(value):
-    return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
 
 
 def model_names(usage_data):
@@ -41,48 +38,45 @@ def model_names(usage_data):
     return names
 
 
-def model_tokens(model_name):
-    tokens = normalize(model_name).split()
-    if tokens and tokens[-1].isdigit() and len(tokens[-1]) >= 8:
-        tokens.pop()
-    return set(tokens)
+def normalize_key(value):
+    # Keep version fragments together: "4-8" / "4.8" → "4.8"
+    text = re.sub(r"(\d+)[.\-](\d+)", r"\1.\2", str(value).lower())
+    return re.sub(r"[^a-z0-9.]+", "", text)
 
 
-def find_score(model_name, results):
-    wanted = model_tokens(model_name)
-    if not wanted:
-        return None
+def fetch_openrouter_models():
+    request = Request(SOURCE_URL, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    payload = json.loads(urlopen(request, timeout=30).read().decode("utf-8"))
+    return payload.get("data") or []
 
-    matches = []
-    for result in results:
-        if not result.get("os_model") or result.get("resolved") is None:
+
+def coding_index_lookup(models):
+    lookup = {}
+    for model in models:
+        aa = (model.get("benchmarks") or {}).get("artificial_analysis") or {}
+        score = aa.get("coding_index")
+        if not isinstance(score, (int, float)):
             continue
 
-        candidate = model_tokens(result.get("name", ""))
-        if wanted.issubset(candidate):
-            matches.append(result["resolved"])
+        candidates = [
+            model.get("id", ""),
+            model.get("id", "").split("/")[-1],
+            model.get("name", ""),
+            model.get("canonical_slug", ""),
+        ]
+        for candidate in candidates:
+            key = normalize_key(candidate)
+            if key:
+                # Prefer the highest score if multiple entries collide.
+                previous = lookup.get(key)
+                if previous is None or score > previous:
+                    lookup[key] = score
 
-    return max(matches) if matches else None
+    return lookup
 
 
-def fetch_verified_results():
-    request = Request(SOURCE_URL, headers={"User-Agent": USER_AGENT})
-    html = urlopen(request, timeout=20).read().decode("utf-8")
-    match = re.search(
-        r'<script\s+type="application/json"\s+id="leaderboard-data"\s*>(.*?)</script>',
-        html,
-        re.DOTALL,
-    )
-    if not match:
-        raise ValueError("official leaderboard data was not found")
-
-    leaderboards = json.loads(match.group(1))
-    verified = next(
-        leaderboard
-        for leaderboard in leaderboards
-        if leaderboard.get("name", "").lower() == "verified"
-    )
-    return verified["results"]
+def find_score(model_name, lookup):
+    return lookup.get(normalize_key(model_name))
 
 
 def write_json_atomically(data):
@@ -97,31 +91,26 @@ def write_json_atomically(data):
 
 
 def main():
-    current = load_json(BENCHMARK_PATH, {})
     usage = load_json(USAGE_PATH, {})
-    scores = {
-        key: value
-        for key, value in current.items()
-        if not key.startswith("_") and isinstance(value, (int, float))
-    }
 
     try:
-        results = fetch_verified_results()
+        lookup = coding_index_lookup(fetch_openrouter_models())
+        scores = {}
         for model_name in model_names(usage):
-            score = find_score(model_name, results)
+            score = find_score(model_name, lookup)
             if score is not None:
                 scores[model_name] = score
 
         updated = {
-            "_source": "SWE-bench Verified",
+            "_source": SOURCE_LABEL,
             "_sourceUrl": SOURCE_URL,
             "_lastSyncedAt": datetime.now(timezone.utc).isoformat(),
             **scores,
         }
         write_json_atomically(updated)
-        print(f"SWE-bench Verified sync complete ({len(scores)} model score(s))")
+        print(f"Coding Index sync complete ({len(scores)} model score(s))")
     except Exception as error:
-        print(f"SWE-bench sync skipped; keeping local data: {error}")
+        print(f"Coding Index sync skipped; keeping local data: {error}")
 
 
 if __name__ == "__main__":
